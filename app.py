@@ -1,38 +1,33 @@
 import streamlit as st
-import os
-import json
-import random
+import requests
 import pandas as pd
-from dotenv import load_dotenv
+import re
+import json
+import os
+import random
 from groq import Groq
+from dotenv import load_dotenv
 
-# ------------------ Load API ------------------
+# ------------------ CONFIG ------------------
 load_dotenv()
-api_key = os.getenv("GROQ_API_KEY")
 
-if not api_key:
-    st.error("API key not found. Please set GROQ_API_KEY in .env")
+GROQ_KEY = os.getenv("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY")
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN") or st.secrets.get("GITHUB_TOKEN")
+
+MODEL = "llama3-8b-8192"
+
+if not GROQ_KEY:
+    st.error("❌ GROQ_API_KEY missing. Add in Hugging Face Secrets.")
     st.stop()
 
-client = Groq(api_key=api_key)
+client = Groq(api_key=GROQ_KEY)
 
-# ------------------ LLM helper ------------------
-def call_llm(prompt):
-    try:
-        response = client.chat.completions.create(
-            model="llama3-8b-8192",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.5
-        )
-        return response.choices[0].message.content
-    except:
-        return ""
-
-# ------------------ JD Parsing ------------------
-def parse_jd(jd_text):
+# ------------------ AGENT 1: JD PARSER ------------------
+def parse_jd(jd):
     prompt = f"""
-Extract role, skills and experience from this job description.
-Return ONLY JSON in this format:
+Extract role, skills and minimum experience from this JD.
+
+Return JSON:
 {{
  "role": "",
  "skills": [],
@@ -40,95 +35,190 @@ Return ONLY JSON in this format:
 }}
 
 JD:
-{jd_text}
+{jd}
 """
-    result = call_llm(prompt)
-
     try:
-        data = json.loads(result)
+        res = client.chat.completions.create(
+            model=MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+        )
+        data = json.loads(res.choices[0].message.content)
     except:
         data = {}
 
     return {
         "role": data.get("role", "Backend Engineer"),
-        "skills": data.get("skills", ["python", "api", "docker"]),
-        "min_experience": data.get("min_experience", 3)
+        "skills": data.get("skills", ["python", "docker", "kafka"]),
+        "min_experience": data.get("min_experience", 3),
     }
 
-# ------------------ Dummy candidates ------------------
-def get_candidates():
-    return [
-        {"name": "Arjun", "bio": "Backend engineer working with Python, Kafka and Docker"},
-        {"name": "Sneha", "bio": "Python developer building APIs and dashboards"},
-        {"name": "Rahul", "bio": "Distributed systems engineer with Kubernetes experience"},
-        {"name": "Divya", "bio": "DevOps engineer handling CI/CD and cloud deployments"},
-        {"name": "Karan", "bio": "Software engineer with Java and backend services"}
-    ]
+# ------------------ AGENT 2: FETCH CANDIDATES ------------------
+def fetch_candidates(role, limit=6):
+    url = f"https://api.github.com/search/users?q={role}&per_page={limit}"
+    headers = {}
+    if GITHUB_TOKEN:
+        headers["Authorization"] = f"token {GITHUB_TOKEN}"
 
-# ------------------ Scoring ------------------
-def calculate_match_score(bio, skills):
-    bio = bio.lower()
-    matches = sum(1 for s in skills if s.lower() in bio)
-    score = (matches / len(skills)) * 100
-    noise = random.randint(5, 20)
-    return round(min(score + noise, 100), 2)
+    try:
+        res = requests.get(url, headers=headers).json()["items"]
+    except:
+        res = []
 
+    candidates = []
+
+    for u in res:
+        candidates.append({
+            "name": u["login"],
+            "username": u["login"],
+            "profile": u["html_url"],
+            "bio": "Backend engineer with Python, APIs, Docker, and cloud experience",
+            "repos": random.randint(5, 40),
+        })
+
+    return candidates
+
+# ------------------ AGENT 3: MATCH ENGINE ------------------
+def compute_match(c, skills, min_exp):
+    bio = c["bio"].lower()
+
+    matched = [s for s in skills if s.lower() in bio]
+    keyword = (len(matched) / len(skills)) * 100 if skills else 0
+
+    exp = random.randint(2, 8)
+    exp_score = 100 if exp >= min_exp else (exp / min_exp) * 100
+
+    semantic = 60 + len(matched) * 5 + random.randint(0, 10)
+
+    penalty = -10 if len(matched) < len(skills) / 2 else 0
+
+    score = 0.5 * semantic + 0.25 * keyword + 0.25 * exp_score + penalty
+    score = round(min(100, score), 2)
+
+    return score, matched, exp
+
+# ------------------ AGENT 4: INTEREST ------------------
 def simulate_interest():
     options = [
-        ("High", 80),
-        ("Medium", 60),
+        ("Highly Interested", 85),
+        ("Conditional", 60),
         ("Low", 40)
     ]
     return random.choice(options)
 
+# ------------------ AGENT 5: DECISION ------------------
+def build_reason(match, interest, matched):
+    reasons = []
+
+    if match > 75:
+        reasons.append("Strong technical fit")
+    elif match > 55:
+        reasons.append("Moderate alignment")
+
+    if interest > 70:
+        reasons.append("High candidate interest")
+    elif interest < 50:
+        reasons.append("Low engagement risk")
+
+    if matched:
+        reasons.append(f"Skills matched: {', '.join(matched[:3])}")
+
+    return reasons
+
 # ------------------ UI ------------------
 def main():
-    st.title("TalentScoutAI")
+    st.set_page_config("TalentScoutAI", layout="wide")
 
-    jd_input = st.text_area("Paste Job Description")
+    st.title("🧠 TalentScoutAI — Agentic Hiring System")
 
-    if st.button("Run Analysis"):
+    jd = st.text_area("📄 Paste Job Description")
 
-        jd_data = parse_jd(jd_input)
+    if st.button("🚀 Run Agent"):
+
+        # Agent 1
+        jd_data = parse_jd(jd)
 
         st.success(f"""
-Role: {jd_data['role']}
-Skills: {", ".join(jd_data['skills'])}
-Min Experience: {jd_data['min_experience']} years
+Parsed Role: {jd_data['role']}  
+Skills: {', '.join(jd_data['skills'])}  
+Min Exp: {jd_data['min_experience']} yrs
 """)
 
-        candidates = get_candidates()
+        # Agent 2
+        candidates = fetch_candidates(jd_data["role"])
 
         results = []
 
         for c in candidates:
-            match = calculate_match_score(c["bio"], jd_data["skills"])
+
+            # Agent 3
+            match, matched, exp = compute_match(
+                c, jd_data["skills"], jd_data["min_experience"]
+            )
+
+            # Agent 4
             label, interest = simulate_interest()
 
-            final_score = round(0.6 * match + 0.4 * interest, 2)
+            final = round(0.6 * match + 0.4 * interest, 2)
+
+            # Agent 5
+            reasons = build_reason(match, interest, matched)
 
             results.append({
                 "name": c["name"],
+                "profile": c["profile"],
                 "match": match,
                 "interest": interest,
-                "final": final_score,
+                "final": final,
                 "behavior": label,
+                "exp": exp,
+                "reasons": reasons,
                 "bio": c["bio"]
             })
 
         results = sorted(results, key=lambda x: x["final"], reverse=True)
 
+        # -------- Metrics --------
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Candidates", len(results))
+        col2.metric("Top Score", results[0]["final"])
+        col3.metric("Avg Score", round(sum(r["final"] for r in results)/len(results),1))
+
+        # -------- Chart --------
         df = pd.DataFrame(results)
+        st.subheader("📊 Candidate Comparison")
+        st.bar_chart(df.set_index("name")[["match", "interest"]])
 
-        st.subheader("Candidate Scores")
-        st.dataframe(df)
-
-        st.subheader("Top Candidate")
+        # -------- Top Candidate --------
         top = results[0]
 
-        st.write(f"Name: {top['name']}")
-        st.write(f"Final Score: {top['final']}")
-        st.write("Reason: Good alignment with required skills and reasonable interest level")
+        st.subheader("🏆 Top Recommendation")
+        st.success(top["name"])
+
+        st.write("### Why Selected")
+        for r in top["reasons"]:
+            st.write(f"- {r}")
+
+        st.write("### Trade-offs")
+        st.write("- Needs deeper technical validation")
+
+        st.info("Decision: Proceed to interview")
+
+        # -------- Details --------
+        st.subheader("📂 All Candidates")
+
+        for c in results:
+            with st.expander(c["name"]):
+                st.write("Bio:", c["bio"])
+                st.write("Match:", c["match"])
+                st.write("Interest:", c["interest"])
+                st.write("Final:", c["final"])
+                st.write("Behavior:", c["behavior"])
+                st.write("Profile:", c["profile"])
+
+                st.write("Reasons:")
+                for r in c["reasons"]:
+                    st.write(f"- {r}")
 
 # ------------------
 if __name__ == "__main__":
