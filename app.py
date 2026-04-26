@@ -6,34 +6,33 @@ import pandas as pd
 from dotenv import load_dotenv
 from groq import Groq
 
-# ---------------- ENV ----------------
+# ------------------ Load API ------------------
 load_dotenv()
-API_KEY = os.getenv("GROQ_API_KEY")
+api_key = os.getenv("GROQ_API_KEY")
 
-if not API_KEY:
-    st.error("Missing GROQ_API_KEY in .env")
+if not api_key:
+    st.error("API key not found. Please set GROQ_API_KEY in .env")
     st.stop()
 
-client = Groq(api_key=API_KEY)
+client = Groq(api_key=api_key)
 
-# ---------------- SAFE LLM ----------------
-def llm(prompt):
+# ------------------ LLM helper ------------------
+def call_llm(prompt):
     try:
-        res = client.chat.completions.create(
+        response = client.chat.completions.create(
             model="llama3-8b-8192",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.6
+            temperature=0.5
         )
-        return res.choices[0].message.content
+        return response.choices[0].message.content
     except:
         return ""
 
-# ---------------- JD PARSER ----------------
-def parse_jd(jd):
+# ------------------ JD Parsing ------------------
+def parse_jd(jd_text):
     prompt = f"""
-Extract structured hiring data in JSON.
-
-Return ONLY JSON:
+Extract role, skills and experience from this job description.
+Return ONLY JSON in this format:
 {{
  "role": "",
  "skills": [],
@@ -41,65 +40,61 @@ Return ONLY JSON:
 }}
 
 JD:
-{jd}
+{jd_text}
 """
-    raw = llm(prompt)
+    result = call_llm(prompt)
 
     try:
-        data = json.loads(raw)
+        data = json.loads(result)
     except:
         data = {}
 
     return {
-        "role": data.get("role") or "Backend Engineer",
-        "skills": data.get("skills") or ["python","kafka","docker","kubernetes"],
-        "min_experience": data.get("min_experience") or 5
+        "role": data.get("role", "Backend Engineer"),
+        "skills": data.get("skills", ["python", "api", "docker"]),
+        "min_experience": data.get("min_experience", 3)
     }
 
-# ---------------- CANDIDATES ----------------
+# ------------------ Dummy candidates ------------------
 def get_candidates():
     return [
-        {"name": "Arjun Mehta", "bio": "Backend engineer with Kafka, distributed systems and Kubernetes"},
-        {"name": "Sneha Iyer", "bio": "Python backend developer building APIs"},
-        {"name": "Rahul Nair", "bio": "Distributed systems engineer working on real-time pipelines"},
-        {"name": "Divya Kapoor", "bio": "DevOps engineer with Kubernetes, Docker and CI/CD"},
-        {"name": "Karan Sharma", "bio": "Java backend developer with Spring Boot"}
+        {"name": "Arjun", "bio": "Backend engineer working with Python, Kafka and Docker"},
+        {"name": "Sneha", "bio": "Python developer building APIs and dashboards"},
+        {"name": "Rahul", "bio": "Distributed systems engineer with Kubernetes experience"},
+        {"name": "Divya", "bio": "DevOps engineer handling CI/CD and cloud deployments"},
+        {"name": "Karan", "bio": "Software engineer with Java and backend services"}
     ]
 
-# ---------------- MATCH SCORE ----------------
-def match_score(bio, skills):
+# ------------------ Scoring ------------------
+def calculate_match_score(bio, skills):
     bio = bio.lower()
     matches = sum(1 for s in skills if s.lower() in bio)
-    keyword_score = (matches / len(skills)) * 100
+    score = (matches / len(skills)) * 100
+    noise = random.randint(5, 20)
+    return round(min(score + noise, 100), 2)
 
-    semantic_boost = random.randint(60, 90)
-
-    return round(0.6 * semantic_boost + 0.4 * keyword_score, 2)
-
-# ---------------- INTEREST ----------------
-def interest_score():
+def simulate_interest():
     options = [
-        ("Highly Interested", 85, "Actively exploring backend roles"),
-        ("Conditional", 60, "Open if compensation aligns"),
-        ("Passive", 40, "Not actively looking but open")
+        ("High", 80),
+        ("Medium", 60),
+        ("Low", 40)
     ]
     return random.choice(options)
 
-# ---------------- MAIN ----------------
+# ------------------ UI ------------------
 def main():
-    st.set_page_config(page_title="TalentScoutAI", layout="wide")
+    st.title("TalentScoutAI")
 
-    st.title("🧠 TalentScoutAI — Agentic Hiring System")
+    jd_input = st.text_area("Paste Job Description")
 
-    jd = st.text_area("📄 Paste Job Description")
+    if st.button("Run Analysis"):
 
-    if st.button("Run Agent"):
-        jd_info = parse_jd(jd)
+        jd_data = parse_jd(jd_input)
 
         st.success(f"""
-Parsed Role: {jd_info['role']}  
-Skills: {', '.join(jd_info['skills'])}  
-Min Experience: {jd_info['min_experience']} years
+Role: {jd_data['role']}
+Skills: {", ".join(jd_data['skills'])}
+Min Experience: {jd_data['min_experience']} years
 """)
 
         candidates = get_candidates()
@@ -107,62 +102,34 @@ Min Experience: {jd_info['min_experience']} years
         results = []
 
         for c in candidates:
-            m_score = match_score(c["bio"], jd_info["skills"])
-            label, i_score, msg = interest_score()
+            match = calculate_match_score(c["bio"], jd_data["skills"])
+            label, interest = simulate_interest()
 
-            final = round(0.6 * m_score + 0.4 * i_score, 2)
+            final_score = round(0.6 * match + 0.4 * interest, 2)
 
             results.append({
-                **c,
-                "match_score": m_score,
-                "interest_score": i_score,
-                "final_score": final,
-                "label": label,
-                "message": msg
+                "name": c["name"],
+                "match": match,
+                "interest": interest,
+                "final": final_score,
+                "behavior": label,
+                "bio": c["bio"]
             })
 
-        results = sorted(results, key=lambda x: x["final_score"], reverse=True)
+        results = sorted(results, key=lambda x: x["final"], reverse=True)
 
-        # ---------------- METRICS ----------------
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Candidates", len(results))
-        col2.metric("Top Score", results[0]["final_score"])
-        col3.metric("Avg Score", round(sum(r["final_score"] for r in results)/len(results),1))
-
-        # ---------------- CHART ----------------
         df = pd.DataFrame(results)
-        st.subheader("📊 Candidate Comparison")
-        st.bar_chart(df.set_index("name")[["match_score","interest_score"]])
 
-        # ---------------- TOP ----------------
+        st.subheader("Candidate Scores")
+        st.dataframe(df)
+
+        st.subheader("Top Candidate")
         top = results[0]
 
-        st.subheader("🏆 Hiring Recommendation")
-        st.success(top["name"])
+        st.write(f"Name: {top['name']}")
+        st.write(f"Final Score: {top['final']}")
+        st.write("Reason: Good alignment with required skills and reasonable interest level")
 
-        st.write("### Why Selected")
-        st.write("- Strong alignment with required skills")
-        st.write("- Good balance of match and interest")
-        st.write("- Suitable for immediate hiring")
-
-        st.write("### Trade-offs")
-        st.write("- May require further technical validation")
-
-        st.info("Decision: Proceed to technical interview")
-
-        # ---------------- DETAILS ----------------
-        st.subheader("📂 Candidate Details")
-
-        for c in results:
-            with st.expander(c["name"]):
-                st.write("Bio:", c["bio"])
-                st.write("Match:", c["match_score"])
-                st.write("Interest:", c["interest_score"])
-                st.write("Final:", c["final_score"])
-                st.write("Behavior:", c["label"])
-
-                st.write("💬 Response:")
-                st.write(c["message"])
-
+# ------------------
 if __name__ == "__main__":
     main()
