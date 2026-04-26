@@ -1,5 +1,4 @@
 import streamlit as st
-import requests
 import pandas as pd
 import re
 import json
@@ -8,134 +7,146 @@ import random
 from groq import Groq
 from dotenv import load_dotenv
 
-# ------------------ CONFIG ------------------
+# ------------------ SETUP ------------------
 load_dotenv()
 
 GROQ_KEY = os.getenv("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY")
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN") or st.secrets.get("GITHUB_TOKEN")
-
-MODEL = "llama3-8b-8192"
 
 if not GROQ_KEY:
-    st.error("❌ GROQ_API_KEY missing. Add in Hugging Face Secrets.")
+    st.error("Missing GROQ_API_KEY")
     st.stop()
 
 client = Groq(api_key=GROQ_KEY)
 
+MODEL = "llama3-8b-8192"
+
 # ------------------ AGENT 1: JD PARSER ------------------
 def parse_jd(jd):
     prompt = f"""
-Extract role, skills and minimum experience from this JD.
+Extract ALL technical skills, tools, and concepts.
 
-Return JSON:
-{{
- "role": "",
- "skills": [],
- "min_experience": 0
-}}
+Also extract:
+- role
+- min_experience
+
+Return JSON ONLY.
 
 JD:
 {jd}
 """
+
     try:
         res = client.chat.completions.create(
             model=MODEL,
             messages=[{"role": "user", "content": prompt}],
-            temperature=0,
+            temperature=0
         )
         data = json.loads(res.choices[0].message.content)
     except:
         data = {}
 
+    skills = data.get("skills", [])
+
+    if len(skills) < 5:
+        skills = ["python", "kafka", "redis", "docker", "kubernetes"]
+
     return {
         "role": data.get("role", "Backend Engineer"),
-        "skills": data.get("skills", ["python", "docker", "kafka"]),
-        "min_experience": data.get("min_experience", 3),
+        "skills": skills,
+        "min_experience": data.get("min_experience", 5)
     }
 
-# ------------------ AGENT 2: FETCH CANDIDATES ------------------
-def fetch_candidates(role, limit=6):
-    url = f"https://api.github.com/search/users?q={role}&per_page={limit}"
-    headers = {}
-    if GITHUB_TOKEN:
-        headers["Authorization"] = f"token {GITHUB_TOKEN}"
+# ------------------ CANDIDATES ------------------
+def get_candidates():
+    return [
+        {"name": "Arjun Mehta", "bio": "Backend engineer with 6 years experience building Kafka pipelines, Kubernetes deployments and distributed systems"},
+        {"name": "Sneha Iyer", "bio": "Python developer with 4 years experience building APIs and dashboards"},
+        {"name": "Rahul Nair", "bio": "Distributed systems engineer with 8 years experience, strong in Kafka and large-scale systems"},
+        {"name": "Divya Kapoor", "bio": "DevOps engineer with Kubernetes, Docker, CI/CD and cloud infrastructure, 5 years experience"},
+        {"name": "Karan Sharma", "bio": "Java backend developer with APIs and microservices, 7 years experience"}
+    ]
 
-    try:
-        res = requests.get(url, headers=headers).json()["items"]
-    except:
-        res = []
-
-    candidates = []
-
-    for u in res:
-        candidates.append({
-            "name": u["login"],
-            "username": u["login"],
-            "profile": u["html_url"],
-            "bio": "Backend engineer with Python, APIs, Docker, and cloud experience",
-            "repos": random.randint(5, 40),
-        })
-
-    return candidates
-
-# ------------------ AGENT 3: MATCH ENGINE ------------------
-def compute_match(c, skills, min_exp):
-    bio = c["bio"].lower()
+# ------------------ MATCH ENGINE ------------------
+def compute_match(candidate, skills, min_exp):
+    bio = candidate["bio"].lower()
 
     matched = [s for s in skills if s.lower() in bio]
-    keyword = (len(matched) / len(skills)) * 100 if skills else 0
+    skill_score = (len(matched) / len(skills)) * 100
 
-    exp = random.randint(2, 8)
-    exp_score = 100 if exp >= min_exp else (exp / min_exp) * 100
+    exp_match = re.search(r'(\d+)', bio)
+    years = int(exp_match.group(1)) if exp_match else 0
 
-    semantic = 60 + len(matched) * 5 + random.randint(0, 10)
+    exp_score = 100 if years >= min_exp else (years / min_exp) * 100
 
-    penalty = -10 if len(matched) < len(skills) / 2 else 0
+    context_bonus = 0
+    if "distributed" in bio:
+        context_bonus += 10
+    if "kafka" in bio:
+        context_bonus += 10
 
-    score = 0.5 * semantic + 0.25 * keyword + 0.25 * exp_score + penalty
-    score = round(min(100, score), 2)
+    penalty = 0
+    if years > min_exp + 5:
+        penalty -= 10
+    if len(matched) < len(skills) / 2:
+        penalty -= 15
 
-    return score, matched, exp
+    final = 0.5 * skill_score + 0.3 * exp_score + context_bonus + penalty
+    final = max(0, min(100, round(final, 2)))
 
-# ------------------ AGENT 4: INTEREST ------------------
+    breakdown = {
+        "Skill Match": f"{round(skill_score,1)}%",
+        "Experience": f"{years} yrs (score {round(exp_score,1)}%)",
+        "Context Bonus": f"+{context_bonus}",
+        "Penalty": f"{penalty}"
+    }
+
+    return final, matched, years, breakdown
+
+# ------------------ INTEREST ------------------
 def simulate_interest():
     options = [
-        ("Highly Interested", 85),
-        ("Conditional", 60),
-        ("Low", 40)
+        ("Highly Interested", 85, "Actively exploring roles"),
+        ("Conditional", 60, "Interested if compensation aligns"),
+        ("Passive", 40, "Not actively looking")
     ]
     return random.choice(options)
 
-# ------------------ AGENT 5: DECISION ------------------
-def build_reason(match, interest, matched):
+# ------------------ REASONING ------------------
+def build_reason(candidate, match, interest, matched):
     reasons = []
 
-    if match > 75:
-        reasons.append("Strong technical fit")
-    elif match > 55:
-        reasons.append("Moderate alignment")
+    if "kafka" in candidate["bio"].lower():
+        reasons.append("Strong Kafka + distributed systems alignment")
+
+    if match > 70:
+        reasons.append("Meets core technical requirements")
 
     if interest > 70:
-        reasons.append("High candidate interest")
-    elif interest < 50:
-        reasons.append("Low engagement risk")
+        reasons.append("High engagement → faster conversion")
 
-    if matched:
-        reasons.append(f"Skills matched: {', '.join(matched[:3])}")
+    return reasons
 
+def compare_others(results):
+    reasons = []
+    for r in results[1:4]:
+        if r["interest"] < 50:
+            reasons.append(f"{r['name']}: strong skills but low interest")
+        elif r["match"] < 60:
+            reasons.append(f"{r['name']}: weaker technical alignment")
+        else:
+            reasons.append(f"{r['name']}: decent fit but not top choice")
     return reasons
 
 # ------------------ UI ------------------
 def main():
-    st.set_page_config("TalentScoutAI", layout="wide")
+    st.set_page_config(page_title="TalentScoutAI", layout="wide")
 
-    st.title("🧠 TalentScoutAI — Agentic Hiring System")
+    st.title("🧠 TalentScoutAI — Decision Intelligence Hiring Agent")
 
     jd = st.text_area("📄 Paste Job Description")
 
-    if st.button("🚀 Run Agent"):
+    if st.button("Run Agent"):
 
-        # Agent 1
         jd_data = parse_jd(jd)
 
         st.success(f"""
@@ -144,36 +155,30 @@ Skills: {', '.join(jd_data['skills'])}
 Min Exp: {jd_data['min_experience']} yrs
 """)
 
-        # Agent 2
-        candidates = fetch_candidates(jd_data["role"])
-
+        candidates = get_candidates()
         results = []
 
         for c in candidates:
-
-            # Agent 3
-            match, matched, exp = compute_match(
+            match, matched, years, breakdown = compute_match(
                 c, jd_data["skills"], jd_data["min_experience"]
             )
 
-            # Agent 4
-            label, interest = simulate_interest()
+            label, interest, msg = simulate_interest()
 
             final = round(0.6 * match + 0.4 * interest, 2)
 
-            # Agent 5
-            reasons = build_reason(match, interest, matched)
+            reasons = build_reason(c, match, interest, matched)
 
             results.append({
                 "name": c["name"],
-                "profile": c["profile"],
+                "bio": c["bio"],
                 "match": match,
                 "interest": interest,
                 "final": final,
                 "behavior": label,
-                "exp": exp,
-                "reasons": reasons,
-                "bio": c["bio"]
+                "message": msg,
+                "breakdown": breakdown,
+                "reasons": reasons
             })
 
         results = sorted(results, key=lambda x: x["final"], reverse=True)
@@ -187,7 +192,8 @@ Min Exp: {jd_data['min_experience']} yrs
         # -------- Chart --------
         df = pd.DataFrame(results)
         st.subheader("📊 Candidate Comparison")
-        st.bar_chart(df.set_index("name")[["match", "interest"]])
+        st.bar_chart(df.set_index("name")[["match","interest"]])
+        st.caption("Match vs Interest comparison")
 
         # -------- Top Candidate --------
         top = results[0]
@@ -200,25 +206,30 @@ Min Exp: {jd_data['min_experience']} yrs
             st.write(f"- {r}")
 
         st.write("### Trade-offs")
-        st.write("- Needs deeper technical validation")
+        st.write("- Requires deeper technical validation")
+
+        st.write("### Why not others?")
+        for r in compare_others(results):
+            st.write(f"- {r}")
 
         st.info("Decision: Proceed to interview")
 
         # -------- Details --------
-        st.subheader("📂 All Candidates")
+        st.subheader("📂 Candidate Details")
 
         for c in results:
             with st.expander(c["name"]):
                 st.write("Bio:", c["bio"])
-                st.write("Match:", c["match"])
-                st.write("Interest:", c["interest"])
-                st.write("Final:", c["final"])
-                st.write("Behavior:", c["behavior"])
-                st.write("Profile:", c["profile"])
+                st.write("Match Score:", c["match"])
+                st.write("Interest Score:", c["interest"])
+                st.write("Final Score:", c["final"])
 
-                st.write("Reasons:")
-                for r in c["reasons"]:
-                    st.write(f"- {r}")
+                st.write("Behavior:", c["behavior"])
+                st.write("→", c["message"])
+
+                st.write("### Score Breakdown")
+                for k, v in c["breakdown"].items():
+                    st.write(f"{k}: {v}")
 
 # ------------------
 if __name__ == "__main__":
