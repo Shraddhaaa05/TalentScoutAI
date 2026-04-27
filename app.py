@@ -22,13 +22,43 @@ if not GROQ_KEY:
 
 client = Groq(api_key=GROQ_KEY)
 
-# ------------------ AGENT 1: JD PARSER ------------------
-def parse_jd(jd):
+# ------------------ VALIDATION ------------------
+def is_valid_jd(jd):
+    jd = jd.lower()
+    if len(jd.strip()) < 80:
+        return False
+
+    signals = ["requirements", "skills", "experience", "responsibilities", "engineer", "developer"]
+    return any(s in jd for s in signals)
+
+# ------------------ RULE BASED PARSER ------------------
+def rule_based_extract(jd):
+    jd_lower = jd.lower()
+
+    role_match = re.search(r'(senior|junior|lead)?\s*(backend|frontend|ml|data|software)\s*(engineer|developer)', jd_lower)
+    role = role_match.group(0).title() if role_match else "Unknown Role"
+
+    exp_match = re.search(r'(\d+)\+?\s*(years|yrs)', jd_lower)
+    min_exp = int(exp_match.group(1)) if exp_match else None
+
+    skill_keywords = [
+        "python","java","go","sql","kafka","redis","postgresql",
+        "docker","kubernetes","aws","gcp","pytorch","tensorflow",
+        "ml","nlp","llm","spark"
+    ]
+
+    skills = [s for s in skill_keywords if s in jd_lower]
+
+    return {
+        "role": role,
+        "skills": list(set(skills)),
+        "min_experience": min_exp
+    }
+
+# ------------------ LLM PARSER ------------------
+def llm_parse_jd(jd):
     prompt = f"""
-Extract:
-- role
-- ALL technical skills, tools, frameworks
-- minimum years of experience
+Extract structured hiring data.
 
 Return JSON ONLY:
 {{
@@ -46,21 +76,47 @@ JD:
             messages=[{"role": "user", "content": prompt}],
             temperature=0
         )
-        data = json.loads(res.choices[0].message.content)
+        return json.loads(res.choices[0].message.content)
     except:
-        data = {}
+        return {}
 
+# ------------------ FINAL PARSER ------------------
+def parse_jd(jd):
+    if not is_valid_jd(jd):
+        st.error("❌ Invalid Job Description. Please enter a real JD.")
+        st.stop()
+
+    data = llm_parse_jd(jd)
+
+    role = data.get("role")
     skills = data.get("skills", [])
-    if len(skills) < 5:
-        skills = ["python", "kafka", "redis", "docker", "kubernetes"]
+    min_exp = data.get("min_experience")
+
+    rb = rule_based_extract(jd)
+
+    if not role:
+        role = rb["role"]
+
+    if not skills or len(skills) < 3:
+        skills = rb["skills"]
+
+    if not min_exp:
+        min_exp = rb["min_experience"]
+
+    if not skills or len(skills) < 2:
+        st.error("❌ Could not extract enough skills.")
+        st.stop()
+
+    if not min_exp:
+        min_exp = 3
 
     return {
-        "role": data.get("role", "Backend Engineer"),
+        "role": role,
         "skills": skills,
-        "min_experience": data.get("min_experience", 5)
+        "min_experience": min_exp
     }
 
-# ------------------ AGENT 2: GITHUB CANDIDATES ------------------
+# ------------------ GITHUB FETCH ------------------
 def fetch_candidates(role, limit=6):
     url = f"https://api.github.com/search/users?q={role}&per_page={limit}"
     headers = {}
@@ -86,86 +142,69 @@ def fetch_candidates(role, limit=6):
         except:
             profile = {}
 
-        bio = profile.get("bio") or "Backend engineer working on scalable systems"
-
         candidates.append({
             "name": username,
             "profile": u["html_url"],
-            "bio": bio,
+            "bio": profile.get("bio") or "Software engineer working on scalable systems",
             "repos": profile.get("public_repos", 0),
             "followers": profile.get("followers", 0)
         })
 
     return candidates
 
-# ------------------ AGENT 3: MATCH ENGINE ------------------
+# ------------------ MATCH ENGINE ------------------
 def compute_match(c, skills, min_exp):
     bio = c["bio"].lower()
 
     matched = [s for s in skills if s.lower() in bio]
-    skill_score = (len(matched) / len(skills)) * 100 if skills else 0
+    skill_score = (len(matched) / len(skills)) * 100
 
-    exp_match = re.search(r'(\d+)', bio)
-    years = int(exp_match.group(1)) if exp_match else random.randint(2, 8)
+    exp = random.randint(2, 8)
+    exp_score = 100 if exp >= min_exp else (exp / min_exp) * 100
 
-    exp_score = 100 if years >= min_exp else (years / min_exp) * 100
+    context_bonus = 10 if "kafka" in bio or "distributed" in bio else 0
 
-    context_bonus = 0
-    if "kafka" in bio:
-        context_bonus += 10
-    if "distributed" in bio:
-        context_bonus += 10
+    github_bonus = 5 if c["repos"] > 20 else 0
+    github_bonus += 5 if c["followers"] > 50 else 0
 
-    github_bonus = 0
-    if c["repos"] > 20:
-        github_bonus += 5
-    if c["followers"] > 50:
-        github_bonus += 5
+    penalty = -15 if len(matched) < len(skills)/2 else 0
 
-    penalty = 0
-    if len(matched) < len(skills) / 2:
-        penalty -= 15
-
-    final = 0.5 * skill_score + 0.3 * exp_score + context_bonus + github_bonus + penalty
-    final = max(0, min(100, round(final, 2)))
+    final = 0.5*skill_score + 0.3*exp_score + context_bonus + github_bonus + penalty
+    final = max(0, min(100, round(final,2)))
 
     breakdown = {
-        "Skill Match": f"{round(skill_score,1)}%",
-        "Experience": f"{years} yrs → {round(exp_score,1)}%",
-        "Context Bonus": f"+{context_bonus}",
-        "GitHub Signal": f"+{github_bonus} (repos/followers)",
-        "Penalty": f"{penalty}"
+        "Skill Match": round(skill_score,1),
+        "Experience": exp,
+        "Context Bonus": context_bonus,
+        "GitHub Bonus": github_bonus,
+        "Penalty": penalty
     }
 
-    return final, matched, years, breakdown
+    return final, matched, breakdown
 
-# ------------------ AGENT 4: INTEREST ------------------
+# ------------------ INTEREST ------------------
 def simulate_interest():
-    options = [
-        ("Highly Interested", 85, "Actively exploring roles"),
-        ("Conditional", 60, "Interested if compensation aligns"),
-        ("Passive", 40, "Not actively looking")
-    ]
-    return random.choice(options)
+    return random.choice([
+        ("Highly Interested",85),
+        ("Conditional",60),
+        ("Passive",40)
+    ])
 
-# ------------------ AGENT 5: DECISION ------------------
+# ------------------ DECISION ------------------
 def build_reason(c, match, interest, matched):
     reasons = []
 
-    if "kafka" in c["bio"].lower():
-        reasons.append("Strong Kafka + distributed systems alignment")
-
-    if c["repos"] > 20:
-        reasons.append("Active open-source contributor")
-
     if match > 70:
-        reasons.append("Meets technical requirements")
+        reasons.append("Strong technical alignment")
 
     if interest > 70:
-        reasons.append("High engagement → faster conversion")
+        reasons.append("High candidate intent")
+
+    if c["repos"] > 20:
+        reasons.append("Active GitHub contributor")
 
     if matched:
-        reasons.append(f"Matched skills: {', '.join(matched[:3])}")
+        reasons.append(f"Skills matched: {', '.join(matched[:3])}")
 
     return reasons
 
@@ -173,18 +212,17 @@ def compare_others(results):
     insights = []
     for r in results[1:4]:
         if r["interest"] < 50:
-            insights.append(f"{r['name']}: strong skills but low interest")
+            insights.append(f"{r['name']}: low interest")
         elif r["match"] < 60:
-            insights.append(f"{r['name']}: weaker technical alignment")
+            insights.append(f"{r['name']}: weak technical fit")
         else:
-            insights.append(f"{r['name']}: good candidate but lower priority")
+            insights.append(f"{r['name']}: decent but not top")
     return insights
 
 # ------------------ UI ------------------
 def main():
     st.set_page_config("TalentScoutAI", layout="wide")
-
-    st.title("🧠 TalentScoutAI — AI Hiring Decision System")
+    st.title("🧠 TalentScoutAI — Hiring Decision System")
 
     jd = st.text_area("📄 Paste Job Description")
 
@@ -193,23 +231,19 @@ def main():
         jd_data = parse_jd(jd)
 
         st.success(f"""
-Parsed Role: {jd_data['role']}  
-Skills: {', '.join(jd_data['skills'])}  
-Min Exp: {jd_data['min_experience']} yrs
+Role: {jd_data['role']}
+Skills: {', '.join(jd_data['skills'])}
+Min Experience: {jd_data['min_experience']} yrs
 """)
 
         candidates = fetch_candidates(jd_data["role"])
+
         results = []
 
         for c in candidates:
-            match, matched, years, breakdown = compute_match(
-                c, jd_data["skills"], jd_data["min_experience"]
-            )
-
-            label, interest, msg = simulate_interest()
-
-            final = round(0.6 * match + 0.4 * interest, 2)
-
+            match, matched, breakdown = compute_match(c, jd_data["skills"], jd_data["min_experience"])
+            label, interest = simulate_interest()
+            final = round(0.6*match + 0.4*interest,2)
             reasons = build_reason(c, match, interest, matched)
 
             results.append({
@@ -219,67 +253,36 @@ Min Exp: {jd_data['min_experience']} yrs
                 "match": match,
                 "interest": interest,
                 "final": final,
-                "behavior": label,
-                "message": msg,
                 "repos": c["repos"],
                 "followers": c["followers"],
-                "breakdown": breakdown,
-                "reasons": reasons
+                "reasons": reasons,
+                "breakdown": breakdown
             })
 
         results = sorted(results, key=lambda x: x["final"], reverse=True)
 
-        # -------- Metrics --------
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Candidates", len(results))
-        col2.metric("Top Score", results[0]["final"])
-        col3.metric("Avg Score", round(sum(r["final"] for r in results)/len(results),1))
+        # Metrics
+        st.write(f"Candidates: {len(results)}")
+        st.write(f"Top Score: {results[0]['final']}")
 
-        # -------- Chart --------
+        # Chart
         df = pd.DataFrame(results)
-        st.subheader("📊 Candidate Comparison")
         st.bar_chart(df.set_index("name")[["match","interest"]])
-        st.caption("Match vs Interest comparison")
 
-        # -------- Top Candidate --------
+        # Top candidate
         top = results[0]
+        st.subheader(f"🏆 {top['name']}")
+        st.markdown(f"[GitHub Profile]({top['profile']})")
 
-        st.subheader("🏆 Top Recommendation")
-        st.success(top["name"])
-        st.markdown(f"🔗 [GitHub Profile]({top['profile']})")
-
-        st.write("### Why Selected")
+        st.write("Why Selected:")
         for r in top["reasons"]:
-            st.write(f"- {r}")
+            st.write("-", r)
 
-        st.write("### Why not others?")
+        st.write("Why not others:")
         for r in compare_others(results):
-            st.write(f"- {r}")
+            st.write("-", r)
 
-        st.write("### Trade-offs")
-        st.write("- Requires deeper technical validation")
-
-        st.info("Decision: Proceed to interview")
-
-        # -------- Details --------
-        st.subheader("📂 Candidate Details")
-
-        for c in results:
-            with st.expander(c["name"]):
-                st.markdown(f"🔗 [GitHub Profile]({c['profile']})")
-                st.write("Bio:", c["bio"])
-                st.write(f"Repos: {c['repos']} | Followers: {c['followers']}")
-
-                st.write("Match:", c["match"])
-                st.write("Interest:", c["interest"])
-                st.write("Final:", c["final"])
-
-                st.write("Behavior:", c["behavior"])
-                st.write("→", c["message"])
-
-                st.write("### Score Breakdown")
-                for k, v in c["breakdown"].items():
-                    st.write(f"{k}: {v}")
+        st.write("Decision: Proceed to interview")
 
 # ------------------
 if __name__ == "__main__":
