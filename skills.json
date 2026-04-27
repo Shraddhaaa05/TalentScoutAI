@@ -1,0 +1,22 @@
+{
+  "tech": [
+    "python","java","c++","machine learning","deep learning",
+    "nlp","computer vision","docker","kubernetes","aws","gcp",
+    "kafka","spark","hadoop","data engineering","data science"
+  ],
+  "marketing": [
+    "seo","content marketing","branding","google ads","campaign management"
+  ],
+  "finance": [
+    "financial analysis","accounting","excel","valuation","forecasting"
+  ],
+  "legal": [
+    "legal research","contracts","compliance","case law","litigation"
+  ],
+  "hr": [
+    "recruitment","talent acquisition","interviewing","onboarding"
+  ],
+  "general": [
+    "communication","problem solving","leadership"
+  ]
+}
